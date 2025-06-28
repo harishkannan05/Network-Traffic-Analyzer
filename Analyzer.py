@@ -1,16 +1,17 @@
+# ----------------- Imports -----------------
 import sys, socket, logging
 from datetime import datetime
 from scapy.all import rdpcap, sniff, IP, TCP, UDP, get_if_list
-try:
-    from scapy.arch.windows import get_windows_if_list # For Windows
+try:                                                        # Platform-specific interface retrieval
+    from scapy.arch.windows import get_windows_if_list    # For Windows
 except ImportError:
-    get_windows_if_list = get_if_list # For Linux/MacOS
+    get_windows_if_list = get_if_list    # For Linux/MacOS
 import pandas as pd
 from tabulate import tabulate
 from tqdm import tqdm
 import geoip2.database, geoip2.errors
 
-# ---------------------- Constants & Logging ----------------------
+# ----------------- Logging Configurations -----------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -18,11 +19,13 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stderr)]
 )
 logger = logging.getLogger("network-analyzer")
-# ---------------------- Constants & Logging ----------------------
 
+# ----------------- Utility Functions -----------------
+# Map protocol number to human-readable name
 def protocol_name(num):
     return {1: "ICMP", 6: "TCP", 17: "UDP"}.get(num, f"OTHER({num})")
 
+# Load blacklist entries from file
 def load_blacklist_entries(path):
     entries = set()
     try:
@@ -37,17 +40,18 @@ def load_blacklist_entries(path):
     logger.info(f"Loaded Blacklist Entries: {entries}")
     return entries
 
+# Validate IPv4s and resolve domain names to IP addresses 
 def build_blacklist(entries):
     ips = set()
     for e in entries:
-        # if valid IPv4 literal
+        # Check if valid IPv4
         try:
             socket.inet_aton(e)
             ips.add(e)
             continue
         except socket.error:
             pass
-        # otherwise resolve hostname
+        # Resolve hostname
         try:
             for res in socket.getaddrinfo(e, None, family=socket.AF_INET):
                 ips.add(res[4][0])
@@ -56,6 +60,7 @@ def build_blacklist(entries):
     logger.info(f"Resolved Blacklisted IPs: {ips}")
     return ips
 
+# Perform GeoIP lookup for a given IP address
 def geo_lookup(reader, ip):
     try:
         rec = reader.city(ip)
@@ -72,6 +77,7 @@ def geo_lookup(reader, ip):
         logger.error(f"GeoIP lookup error for {ip}: {e}")
         return None
 
+# ----------------- Main Packet Analysis -----------------
 def analyze_packets(packets, blacklist_ips, port_scan_threshold, geo_db):
     try:
         reader = geoip2.database.Reader(geo_db)
@@ -85,6 +91,7 @@ def analyze_packets(packets, blacklist_ips, port_scan_threshold, geo_db):
     rows = []
     seen_blacklist = set()
 
+    # Loop through packets and extract metadata
     for i, pkt in enumerate(tqdm(packets, desc="Processing packets"), start=1):
         if IP not in pkt:
             continue
@@ -103,6 +110,7 @@ def analyze_packets(packets, blacklist_ips, port_scan_threshold, geo_db):
                 "dst_port": dst_port
             })
 
+            # Check against blacklist
             if src in blacklist_ips:
                 seen_blacklist.add(src)
             if dst in blacklist_ips:
@@ -118,7 +126,7 @@ def analyze_packets(packets, blacklist_ips, port_scan_threshold, geo_db):
         reader.close()
         return
 
-    # ------------- Overall Stats --------------
+    # ------------- Overall Traffic Stats -------------
     total_bytes = df["size"].sum()
     bw = total_bytes / 1e6
     logger.info(f"Total traffic: {total_bytes} bytes ({bw:.4f} MB)")
@@ -135,7 +143,7 @@ def analyze_packets(packets, blacklist_ips, port_scan_threshold, geo_db):
     logger.info("\nProtocol breakdown:\n%s", tabulate(proto_counts, headers="keys", tablefmt="fancy_grid", floatfmt=".1f"))
     print()
 
-    # ------------ Top Talkers ------------
+    # ------------ Top 10 Conversations ------------
     talkers = (
         df.groupby(["src","dst"])
           .size()
@@ -147,7 +155,7 @@ def analyze_packets(packets, blacklist_ips, port_scan_threshold, geo_db):
     logger.info("\nTop 10 src --> dst flows:\n%s", tabulate(talkers, headers="keys", tablefmt="fancy_grid"))
     print()
 
-    # ------------ Port-Scan Detection ------------
+    # ------------ Port Scan Detection ------------
     scans = (
         df.dropna(subset=["dst_port"])
           .groupby(["src","dst_port"])
@@ -161,7 +169,7 @@ def analyze_packets(packets, blacklist_ips, port_scan_threshold, geo_db):
         logger.warning("\nPort-scan suspects:\n%s", tabulate(suspects, headers="keys", tablefmt="fancy_grid"))
         print()
 
-    # ---------- Geolocate blacklisted IPs ----------
+    # ---------- Geolocation of Blacklisted IPs ----------
     if seen_blacklist:
         logger.info("Blacklisted IPs seen: %s", seen_blacklist)
 
@@ -192,7 +200,7 @@ def analyze_packets(packets, blacklist_ips, port_scan_threshold, geo_db):
         logger.info("\nGeolocation of Blacklisted IPs and peers:\n%s", tabulate(geo_df, headers="keys", tablefmt="fancy_grid", floatfmt=".4f"))
         print()
 
-        # ---------- KML ----------
+        # ---------- Generate KML for visualization ----------
         kml_name = f"blacklist_{datetime.now().strftime('%m%d%Y_%Hh%Mm')}.kml"
         try:
             with open(kml_name,"w") as kml:
@@ -208,8 +216,9 @@ def analyze_packets(packets, blacklist_ips, port_scan_threshold, geo_db):
 
     reader.close()
 
+# ---------------------- Live Traffic Capture ----------------------
 live_packets = []
-packet_counter = {"count": 0}  # Dictionary to mutate count inside nested function
+packet_counter = {"count": 0}  
 
 def handle_live_packet(pkt):
     if IP not in pkt:
@@ -219,6 +228,7 @@ def handle_live_packet(pkt):
     if packet_counter["count"] % 1000 == 0:
         logger.info(f"Processed {packet_counter['count']} packets so far…")
 
+# Interface selection for live capture
 def select_interface():
     """List available interfaces and let the user pick one."""
     interfaces = get_windows_if_list()
@@ -241,17 +251,17 @@ def select_interface():
             sys.exit(1)
     return sel 
 
+# ---------------------- Entry Point ----------------------
 def main():
-    # 1) Load GeoLite2 Database
+    # Prompt for paths and load data
     GEO_DB = input("Enter path to GeoLite2-City.mmdb: ").strip() or "GeoLite2-City.mmdb"
-
-    # 2) load blacklist
     blacklist_path = input("Enter path to blacklist file: ").strip() or "blacklist.txt"
+    
     raw = load_blacklist_entries(blacklist_path)
     blacklist_ips = build_blacklist(raw)
     logger.info(f"Using {len(blacklist_ips)} blacklisted IP(s)")
 
-    # 3) Menu
+    # Main menu loop
     while True:
         print("\nMenu:\n  1) Analyze from PCAP file\n  2) Analyze live traffic\n  q) Quit\n")
         choice = input("Select [1, 2, or q]: ").strip().lower()
