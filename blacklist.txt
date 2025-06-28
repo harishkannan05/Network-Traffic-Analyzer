@@ -1,0 +1,9 @@
+# Add one IP address or Hostname per line to blacklist.
+
+# IPs
+217.168.1.2
+192.37.115.0
+
+# Hostnames
+yolo.com
+httpbin.org
